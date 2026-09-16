@@ -13,7 +13,11 @@ This repo packages **OpenClaw** for Railway with a small **/setup** web wizard s
 ## How it works (high level)
 
 - The container runs a wrapper web server.
-- The wrapper protects `/setup` (and the Control UI at `/openclaw`) with `SETUP_PASSWORD` using HTTP Basic auth.
+- The wrapper protects `/setup` with `SETUP_PASSWORD` using HTTP Basic auth.
+- The Control UI (`/openclaw`) can be protected in one of two ways, switchable from `/setup` → **Dashboard authentication**:
+  - **Token link** (Hostinger-style): no username/password prompt. The **Open OpenClaw** button in `/setup` opens `/openclaw#token=<gateway token>`; the Control UI stores the token for the tab and strips it from the address bar. The wrapper does *not* inject the gateway token in this mode, so the dashboard is only usable by whoever has the token.
+  - **Password** (default for existing deployments): every dashboard request requires HTTP Basic auth with `SETUP_PASSWORD`, and the wrapper injects the gateway token for you.
+  - The choice is saved on the volume (`<state dir>/railway-wrapper.json`). Set `DASHBOARD_AUTH_MODE=token|password` in Railway Variables to force a mode.
 - During setup, the wrapper runs `openclaw onboard --non-interactive ...` inside the container, writes state to the volume, and then starts the gateway.
 - After setup, **`/` is OpenClaw**. The wrapper reverse-proxies all traffic (including WebSockets) to the local gateway process.
 
@@ -34,6 +38,7 @@ Recommended:
 
 Optional:
 - `OPENCLAW_GATEWAY_TOKEN` — if not set, the wrapper generates one (not ideal). In a template, set it using a generated secret.
+- `DASHBOARD_AUTH_MODE` — `token` or `password`. Forces how `/openclaw` is protected and locks the selector in `/setup`. If unset, the mode chosen in `/setup` is used (default `password`).
 
 Notes:
 - This template pins OpenClaw to a released version by default via Docker build arg `OPENCLAW_GIT_REF` (override if you want `main`).
@@ -46,7 +51,7 @@ Then:
 - Visit `https://<your-app>.up.railway.app/setup`
   - Your browser will prompt for **HTTP Basic auth**. Use any username; the password is `SETUP_PASSWORD`.
 - Complete setup
-- Visit `https://<your-app>.up.railway.app/` and `/openclaw` (same Basic auth)
+- Click **Open OpenClaw** in `/setup`. With **Token link** auth (recommended) you are logged in automatically; with **Password** auth the browser asks for `SETUP_PASSWORD` again.
 
 ## Support / community
 

@@ -2,32 +2,82 @@
 // No fancy syntax: keep it maximally compatible.
 
 (function () {
-  var statusEl = document.getElementById('status');
-  var statusDetailsEl = document.getElementById('statusDetails');
-  var authGroupEl = document.getElementById('authGroup');
-  var authChoiceEl = document.getElementById('authChoice');
-  var logEl = document.getElementById('log');
+  function $(id) { return document.getElementById(id); }
+
+  var statusEl = $('status');
+  var statusVersionEl = $('statusVersion');
+  var statusDetailsEl = $('statusDetails');
+  var authGroupEl = $('authGroup');
+  var authChoiceEl = $('authChoice');
+  var logEl = $('log');
+
+  // Access card
+  var openUiEl = $('openUi');
+  var accessHintEl = $('accessHint');
+  var copyLinkEl = $('copyLink');
+  var copyLinkOutEl = $('copyLinkOut');
+  var dashboardAuthOutEl = $('dashboardAuthOut');
+  var gatewayTokenEl = $('gatewayToken');
+  var tokenToggleEl = $('tokenToggle');
+  var tokenCopyEl = $('tokenCopy');
+  var tokenSourceEl = $('tokenSource');
+
+  // Wizard
+  var wizardDetailsEl = $('wizardDetails');
+  var wizardNoteEl = $('wizardNote');
 
   // Debug console
-  var consoleCmdEl = document.getElementById('consoleCmd');
-  var consoleArgEl = document.getElementById('consoleArg');
-  var consoleRunEl = document.getElementById('consoleRun');
-  var consoleOutEl = document.getElementById('consoleOut');
+  var consoleCmdEl = $('consoleCmd');
+  var consoleArgEl = $('consoleArg');
+  var consoleRunEl = $('consoleRun');
+  var consoleOutEl = $('consoleOut');
 
   // Config editor
-  var configPathEl = document.getElementById('configPath');
-  var configTextEl = document.getElementById('configText');
-  var configReloadEl = document.getElementById('configReload');
-  var configSaveEl = document.getElementById('configSave');
-  var configOutEl = document.getElementById('configOut');
+  var configPathEl = $('configPath');
+  var configTextEl = $('configText');
+  var configReloadEl = $('configReload');
+  var configSaveEl = $('configSave');
+  var configOutEl = $('configOut');
 
   // Import
-  var importFileEl = document.getElementById('importFile');
-  var importRunEl = document.getElementById('importRun');
-  var importOutEl = document.getElementById('importOut');
+  var importFileEl = $('importFile');
+  var importRunEl = $('importRun');
+  var importOutEl = $('importOut');
 
-  function setStatus(s) {
-    statusEl.textContent = s;
+  // Pairing
+  var pairingOutEl = $('pairingOut');
+
+  var currentStatus = null;
+
+  function setStatus(text, kind) {
+    statusEl.textContent = text;
+    statusEl.className = 'pill' + (kind ? ' ' + kind : '');
+  }
+
+  function setMsg(el, text, kind) {
+    if (!el) return;
+    el.textContent = text || '';
+    el.className = 'msg' + (kind ? ' ' + kind : '');
+  }
+
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text);
+    }
+    return new Promise(function (resolve, reject) {
+      try {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'absolute';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        resolve();
+      } catch (e) { reject(e); }
+    });
   }
 
   function isInteractiveOAuth(optionValue, optionLabel) {
@@ -40,14 +90,13 @@
     authGroupEl.innerHTML = '';
 
     // Toggle for showing interactive OAuth choices.
-    var advancedToggle = document.getElementById('showAdvancedAuth');
+    var advancedToggle = $('showAdvancedAuth');
     if (!advancedToggle) {
       advancedToggle = document.createElement('label');
-      advancedToggle.style.display = 'block';
-      advancedToggle.style.marginTop = '0.5rem';
-      advancedToggle.innerHTML = '<input type="checkbox" id="showAdvancedAuth" /> Show interactive OAuth options (advanced)';
-      // Insert before authChoiceEl (not its parentNode) to avoid DOM error
-      authGroupEl.parentNode.insertBefore(advancedToggle, authChoiceEl);
+      advancedToggle.className = 'muted';
+      advancedToggle.style.fontWeight = '400';
+      advancedToggle.innerHTML = '<input type="checkbox" id="showAdvancedAuth" /> Show interactive OAuth options (advanced, need a terminal)';
+      authChoiceEl.parentNode.insertBefore(advancedToggle, authChoiceEl.nextSibling);
     }
 
     for (var i = 0; i < groups.length; i++) {
@@ -65,7 +114,8 @@
       }
       authChoiceEl.innerHTML = '';
       var opts = (sel && sel.options) ? sel.options : [];
-      var showAdv = Boolean(document.getElementById('showAdvancedAuth') && document.getElementById('showAdvancedAuth').checked);
+      var advEl = $('showAdvancedAuth');
+      var showAdv = Boolean(advEl && advEl.checked);
 
       var firstNonInteractive = null;
       for (var k = 0; k < opts.length; k++) {
@@ -85,8 +135,8 @@
     }
 
     authGroupEl.onchange = rerenderChoices;
-    var advEl = document.getElementById('showAdvancedAuth');
-    if (advEl) advEl.onchange = rerenderChoices;
+    var advEl2 = $('showAdvancedAuth');
+    if (advEl2) advEl2.onchange = rerenderChoices;
 
     rerenderChoices();
   }
@@ -97,26 +147,140 @@
     return fetch(url, opts).then(function (res) {
       if (!res.ok) {
         return res.text().then(function (t) {
-          throw new Error('HTTP ' + res.status + ': ' + (t || res.statusText));
+          var msg = t || res.statusText;
+          try { var j = JSON.parse(t); if (j && j.error) msg = j.error; } catch (_e) { /* not json */ }
+          throw new Error('HTTP ' + res.status + ': ' + msg);
         });
       }
       return res.json();
     });
   }
 
+  // ---- Access card -------------------------------------------------------
+
+  function renderAccess(j) {
+    var mode = j.dashboardAuth || 'password';
+    var url = j.controlUiUrl || '/openclaw';
+
+    if (openUiEl) {
+      openUiEl.setAttribute('href', url);
+      openUiEl.setAttribute('aria-disabled', j.configured ? 'false' : 'true');
+    }
+
+    if (accessHintEl) {
+      if (!j.configured) {
+        accessHintEl.textContent = 'Run the setup wizard below first. The dashboard becomes available once OpenClaw is configured.';
+      } else if (mode === 'token') {
+        accessHintEl.textContent = 'Click the button: the link carries the gateway token and logs you in automatically (no password prompt). The token is removed from the address bar once the dashboard loads.';
+      } else {
+        accessHintEl.textContent = 'The browser will ask for a username (anything) and your SETUP_PASSWORD.';
+      }
+    }
+
+    var radios = document.querySelectorAll('input[name="dashboardAuth"]');
+    for (var i = 0; i < radios.length; i++) {
+      radios[i].checked = radios[i].value === mode;
+      radios[i].disabled = Boolean(j.dashboardAuthLockedByEnv);
+      var wrap = radios[i].parentNode;
+      if (wrap && wrap.classList) {
+        if (radios[i].checked) wrap.classList.add('selected'); else wrap.classList.remove('selected');
+      }
+    }
+    if (j.dashboardAuthLockedByEnv) {
+      setMsg(dashboardAuthOutEl, 'Locked: DASHBOARD_AUTH_MODE is set in Railway Variables. Remove it to change the mode here.', '');
+    }
+
+    if (gatewayTokenEl) gatewayTokenEl.value = j.gatewayToken || '';
+    if (tokenSourceEl) {
+      tokenSourceEl.textContent = j.gatewayTokenFromEnv
+        ? 'Source: OPENCLAW_GATEWAY_TOKEN (Railway Variables).'
+        : 'Source: generated by the wrapper and stored on the volume (gateway.token). Set OPENCLAW_GATEWAY_TOKEN in Railway Variables to choose your own.';
+    }
+  }
+
+  function saveDashboardAuth(mode) {
+    setMsg(dashboardAuthOutEl, 'Saving…', '');
+    return httpJson('/setup/api/dashboard-auth', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mode: mode })
+    }).then(function (j) {
+      setMsg(dashboardAuthOutEl, 'Saved. Dashboard now uses ' + (j.dashboardAuth === 'token' ? 'token link' : 'password') + ' authentication.', 'ok');
+      return refreshStatus();
+    }).catch(function (e) {
+      setMsg(dashboardAuthOutEl, 'Error: ' + String(e.message || e), 'err');
+      // Revert radios to the server state.
+      if (currentStatus) renderAccess(currentStatus);
+    });
+  }
+
+  (function wireAccess() {
+    var radios = document.querySelectorAll('input[name="dashboardAuth"]');
+    for (var i = 0; i < radios.length; i++) {
+      radios[i].onchange = function (ev) {
+        if (ev.target.checked) saveDashboardAuth(ev.target.value);
+      };
+    }
+
+    if (copyLinkEl) {
+      copyLinkEl.onclick = function () {
+        var href = openUiEl ? openUiEl.getAttribute('href') : '/openclaw';
+        var abs = new URL(href, window.location.href).toString();
+        copyText(abs).then(function () {
+          if (copyLinkOutEl) copyLinkOutEl.textContent = 'Copied.';
+          setTimeout(function () { if (copyLinkOutEl) copyLinkOutEl.textContent = ''; }, 2000);
+        }).catch(function () {
+          if (copyLinkOutEl) copyLinkOutEl.textContent = 'Copy failed. Link: ' + abs;
+        });
+      };
+    }
+
+    if (tokenToggleEl && gatewayTokenEl) {
+      tokenToggleEl.onclick = function () {
+        var hidden = gatewayTokenEl.type === 'password';
+        gatewayTokenEl.type = hidden ? 'text' : 'password';
+        tokenToggleEl.textContent = hidden ? 'Hide' : 'Show';
+      };
+    }
+
+    if (tokenCopyEl && gatewayTokenEl) {
+      tokenCopyEl.onclick = function () {
+        copyText(gatewayTokenEl.value).then(function () {
+          tokenCopyEl.textContent = 'Copied';
+          setTimeout(function () { tokenCopyEl.textContent = 'Copy'; }, 2000);
+        }).catch(function () {
+          tokenCopyEl.textContent = 'Failed';
+        });
+      };
+    }
+  })();
+
+  // ---- Status --------------------------------------------------------------
+
   function refreshStatus() {
-    setStatus('Loading...');
+    setStatus('Loading…', '');
     if (statusDetailsEl) statusDetailsEl.textContent = '';
 
     return httpJson('/setup/api/status').then(function (j) {
-      var ver = j.openclawVersion ? (' | ' + j.openclawVersion) : '';
-      setStatus((j.configured ? 'Configured' : 'Not configured - run setup below') + ver);
+      currentStatus = j;
 
-      if (statusDetailsEl) {
-        var parts = [];
-        parts.push('Gateway target: ' + (j.gatewayTarget || '(unknown)'));
-        parts.push('Tip: /healthz shows wrapper+gateway reachability.');
-        statusDetailsEl.textContent = parts.join('\n');
+      if (j.configured) {
+        setStatus(j.gatewayRunning ? 'Configured · gateway running' : 'Configured · gateway starting', j.gatewayRunning ? 'ok' : 'warn');
+      } else {
+        setStatus('Not configured', 'warn');
+      }
+      if (statusVersionEl) statusVersionEl.textContent = j.openclawVersion ? ('OpenClaw ' + j.openclawVersion) : '';
+      if (statusDetailsEl) statusDetailsEl.textContent = 'Internal gateway: ' + (j.gatewayTarget || '(unknown)');
+
+      renderAccess(j);
+
+      if (wizardDetailsEl) {
+        if (!j.configured) wizardDetailsEl.open = true;
+      }
+      if (wizardNoteEl) {
+        wizardNoteEl.textContent = j.configured
+          ? 'OpenClaw is already configured. Use Reset setup if you want to run onboarding again (channels can also be changed in the dashboard).'
+          : 'Runs the same onboarding OpenClaw uses in the terminal, from the browser.';
       }
 
       // If channels are unsupported, surface it for debugging.
@@ -128,9 +292,8 @@
       if (configReloadEl && configTextEl) {
         loadConfigRaw();
       }
-
     }).catch(function (e) {
-      setStatus('Error: ' + String(e));
+      setStatus('Error: ' + String(e.message || e), 'err');
       if (statusDetailsEl) statusDetailsEl.textContent = '';
     });
   }
@@ -149,24 +312,27 @@
     });
   }
 
-  document.getElementById('run').onclick = function () {
-    var payload = {
-      flow: document.getElementById('flow').value,
-      authChoice: authChoiceEl.value,
-      authSecret: document.getElementById('authSecret').value,
-      telegramToken: document.getElementById('telegramToken').value,
-      discordToken: document.getElementById('discordToken').value,
-      slackBotToken: document.getElementById('slackBotToken').value,
-      slackAppToken: document.getElementById('slackAppToken').value,
+  // ---- Wizard ---------------------------------------------------------------
 
-      customProviderId: document.getElementById('customProviderId').value,
-      customProviderBaseUrl: document.getElementById('customProviderBaseUrl').value,
-      customProviderApi: document.getElementById('customProviderApi').value,
-      customProviderApiKeyEnv: document.getElementById('customProviderApiKeyEnv').value,
-      customProviderModelId: document.getElementById('customProviderModelId').value
+  $('run').onclick = function () {
+    var payload = {
+      flow: $('flow').value,
+      authChoice: authChoiceEl.value,
+      authSecret: $('authSecret').value,
+      telegramToken: $('telegramToken').value,
+      discordToken: $('discordToken').value,
+      slackBotToken: $('slackBotToken').value,
+      slackAppToken: $('slackAppToken').value,
+
+      customProviderId: $('customProviderId').value,
+      customProviderBaseUrl: $('customProviderBaseUrl').value,
+      customProviderApi: $('customProviderApi').value,
+      customProviderApiKeyEnv: $('customProviderApiKeyEnv').value,
+      customProviderModelId: $('customProviderModelId').value
     };
 
     logEl.textContent = 'Running...\n';
+    $('run').disabled = true;
 
     fetch('/setup/api/run', {
       method: 'POST',
@@ -182,10 +348,22 @@
       return refreshStatus();
     }).catch(function (e) {
       logEl.textContent += '\nError: ' + String(e) + '\n';
+    }).then(function () {
+      $('run').disabled = false;
     });
   };
 
-  // Debug console runner
+  $('reset').onclick = function () {
+    if (!confirm('Reset setup? This deletes the config file so onboarding can run again.')) return;
+    logEl.textContent = 'Resetting...\n';
+    fetch('/setup/api/reset', { method: 'POST', credentials: 'same-origin' })
+      .then(function (res) { return res.text(); })
+      .then(function (t) { logEl.textContent += t + '\n'; return refreshStatus(); })
+      .catch(function (e) { logEl.textContent += 'Error: ' + String(e) + '\n'; });
+  };
+
+  // ---- Debug console --------------------------------------------------------
+
   function runConsole() {
     if (!consoleCmdEl || !consoleRunEl) return;
     var cmd = consoleCmdEl.value;
@@ -204,11 +382,10 @@
     });
   }
 
-  if (consoleRunEl) {
-    consoleRunEl.onclick = runConsole;
-  }
+  if (consoleRunEl) consoleRunEl.onclick = runConsole;
 
-  // Config raw load/save
+  // ---- Config editor --------------------------------------------------------
+
   function loadConfigRaw() {
     if (!configTextEl) return;
     if (configOutEl) configOutEl.textContent = '';
@@ -241,7 +418,8 @@
   if (configReloadEl) configReloadEl.onclick = loadConfigRaw;
   if (configSaveEl) configSaveEl.onclick = saveConfigRaw;
 
-  // Import backup
+  // ---- Import backup --------------------------------------------------------
+
   function runImport() {
     if (!importRunEl || !importFileEl) return;
     var f = importFileEl.files && importFileEl.files[0];
@@ -273,8 +451,9 @@
 
   if (importRunEl) importRunEl.onclick = runImport;
 
-  // Pairing approve helper
-  var pairingBtn = document.getElementById('pairingApprove');
+  // ---- Pairing --------------------------------------------------------------
+
+  var pairingBtn = $('pairingApprove');
   if (pairingBtn) {
     pairingBtn.onclick = function () {
       var channel = prompt('Enter channel (telegram or discord):');
@@ -286,21 +465,21 @@
       }
       var code = prompt('Enter pairing code (e.g. 3EY4PUYS):');
       if (!code) return;
-      logEl.textContent += '\nApproving pairing for ' + channel + '...\n';
+      var out = pairingOutEl || logEl;
+      out.textContent += 'Approving pairing for ' + channel + '...\n';
       fetch('/setup/api/pairing/approve', {
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ channel: channel, code: code.trim() })
       }).then(function (r) { return r.text(); })
-        .then(function (t) { logEl.textContent += t + '\n'; })
-        .catch(function (e) { logEl.textContent += 'Error: ' + String(e) + '\n'; });
+        .then(function (t) { out.textContent += t + '\n'; })
+        .catch(function (e) { out.textContent += 'Error: ' + String(e) + '\n'; });
     };
   }
 
-  // Device pairing helper
-  var devicesRefreshBtn = document.getElementById('devicesRefresh');
-  var devicesListEl = document.getElementById('devicesList');
+  var devicesRefreshBtn = $('devicesRefresh');
+  var devicesListEl = $('devicesList');
 
   function approveDevice(requestId) {
     if (!requestId) return;
@@ -332,11 +511,12 @@
       for (var i = 0; i < ids.length; i++) {
         (function (id) {
           var row = document.createElement('div');
-          row.style.marginTop = '0.25rem';
+          row.className = 'row';
+          row.style.marginTop = '0.35rem';
           var btn = document.createElement('button');
-          btn.textContent = 'Approve ' + id;
-          btn.style.background = '#111';
-          btn.style.marginRight = '0.5rem';
+          btn.type = 'button';
+          btn.className = 'btn sm';
+          btn.textContent = 'Approve';
           btn.onclick = function () { approveDevice(id); };
           var code = document.createElement('code');
           code.textContent = id;
@@ -350,18 +530,9 @@
     });
   }
 
-  if (devicesRefreshBtn) {
-    devicesRefreshBtn.onclick = refreshDevices;
-  }
+  if (devicesRefreshBtn) devicesRefreshBtn.onclick = refreshDevices;
 
-  document.getElementById('reset').onclick = function () {
-    if (!confirm('Reset setup? This deletes the config file so onboarding can run again.')) return;
-    logEl.textContent = 'Resetting...\n';
-    fetch('/setup/api/reset', { method: 'POST', credentials: 'same-origin' })
-      .then(function (res) { return res.text(); })
-      .then(function (t) { logEl.textContent += t + '\n'; return refreshStatus(); })
-      .catch(function (e) { logEl.textContent += 'Error: ' + String(e) + '\n'; });
-  };
+  // ---- Boot -----------------------------------------------------------------
 
   // Populate provider/auth selects ASAP (fast endpoint, no subprocesses)
   loadAuthGroupsFast();

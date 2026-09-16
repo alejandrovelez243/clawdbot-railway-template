@@ -3,10 +3,14 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import express from "express";
 import httpProxy from "http-proxy";
 import * as tar from "tar";
+
+// Directory holding the wrapper sources (setup.html / setup-app.js), independent of process.cwd().
+const SRC_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 // Migrate deprecated CLAWDBOT_* env vars → OPENCLAW_* so existing Railway deployments
 // keep working. Users should update their Railway Variables to use the new names.
@@ -67,8 +71,65 @@ function resolveGatewayToken() {
   return generated;
 }
 
+// Capture before resolveGatewayToken() (we re-export the resolved token into process.env below).
+const GATEWAY_TOKEN_FROM_ENV = Boolean(process.env.OPENCLAW_GATEWAY_TOKEN?.trim());
 const OPENCLAW_GATEWAY_TOKEN = resolveGatewayToken();
 process.env.OPENCLAW_GATEWAY_TOKEN = OPENCLAW_GATEWAY_TOKEN;
+
+// Wrapper-level settings that must survive redeploys (stored on the Railway volume).
+const WRAPPER_SETTINGS_PATH = path.join(STATE_DIR, "railway-wrapper.json");
+const DASHBOARD_AUTH_MODES = new Set(["password", "token"]);
+
+function readWrapperSettings() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(WRAPPER_SETTINGS_PATH, "utf8"));
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+let wrapperSettings = readWrapperSettings();
+
+function writeWrapperSettings(next) {
+  fs.mkdirSync(STATE_DIR, { recursive: true });
+  fs.writeFileSync(WRAPPER_SETTINGS_PATH, JSON.stringify(next, null, 2) + "\n", { encoding: "utf8", mode: 0o600 });
+  wrapperSettings = next;
+}
+
+// How the Control UI (dashboard) is protected:
+// - "password": HTTP Basic auth with SETUP_PASSWORD on every dashboard request. The wrapper
+//   injects the gateway token into proxied requests, so the browser never sees the token.
+// - "token": no Basic auth on the dashboard. The browser must present the gateway token itself:
+//   the /setup "Open OpenClaw" button passes it in the URL fragment (`/openclaw#token=...`), the
+//   Control UI stores it in session storage and strips it from the address bar (Hostinger-style).
+//   The wrapper does NOT inject the token in this mode, otherwise the dashboard would be open to anyone.
+// DASHBOARD_AUTH_MODE (env) overrides the value saved from /setup.
+function dashboardAuthModeFromEnv() {
+  const v = process.env.DASHBOARD_AUTH_MODE?.trim().toLowerCase();
+  return v && DASHBOARD_AUTH_MODES.has(v) ? v : null;
+}
+
+function dashboardAuthMode() {
+  const fromEnv = dashboardAuthModeFromEnv();
+  if (fromEnv) return fromEnv;
+  const saved = String(wrapperSettings.dashboardAuth || "").toLowerCase();
+  return DASHBOARD_AUTH_MODES.has(saved) ? saved : "password";
+}
+
+function setDashboardAuthMode(mode) {
+  if (!DASHBOARD_AUTH_MODES.has(mode)) throw new Error(`Invalid dashboard auth mode: ${mode}`);
+  writeWrapperSettings({ ...wrapperSettings, dashboardAuth: mode });
+}
+
+// Link used by the /setup "Open OpenClaw" button.
+// In token mode the token travels in the URL fragment, which browsers never send to the server
+// (so it does not end up in Railway request logs).
+function controlUiUrl() {
+  const base = "/openclaw";
+  if (dashboardAuthMode() !== "token") return base;
+  return `${base}#token=${encodeURIComponent(OPENCLAW_GATEWAY_TOKEN)}`;
+}
 
 // Where the gateway will listen internally (we proxy to it).
 const INTERNAL_GATEWAY_PORT = Number.parseInt(process.env.INTERNAL_GATEWAY_PORT ?? "18789", 10);
@@ -357,177 +418,12 @@ app.get("/healthz", async (_req, res) => {
 app.get("/setup/app.js", requireSetupAuth, (_req, res) => {
   // Serve JS for /setup (kept external to avoid inline encoding/template issues)
   res.type("application/javascript");
-  res.send(fs.readFileSync(path.join(process.cwd(), "src", "setup-app.js"), "utf8"));
+  res.send(fs.readFileSync(path.join(SRC_DIR, "setup-app.js"), "utf8"));
 });
 
 app.get("/setup", requireSetupAuth, (_req, res) => {
-  // No inline <script>: serve JS from /setup/app.js to avoid any encoding/template-literal issues.
-  res.type("html").send(`<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>OpenClaw Setup</title>
-  <style>
-    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; margin: 2rem; max-width: 900px; }
-    .card { border: 1px solid #ddd; border-radius: 12px; padding: 1.25rem; margin: 1rem 0; }
-    label { display:block; margin-top: 0.75rem; font-weight: 600; }
-    input, select { width: 100%; padding: 0.6rem; margin-top: 0.25rem; }
-    button { padding: 0.8rem 1.2rem; border-radius: 10px; border: 0; background: #111; color: #fff; font-weight: 700; cursor: pointer; }
-    code { background: #f6f6f6; padding: 0.1rem 0.3rem; border-radius: 6px; }
-    .muted { color: #555; }
-  </style>
-</head>
-<body>
-  <h1>OpenClaw Setup</h1>
-  <p class="muted">This wizard configures OpenClaw by running the same onboarding command it uses in the terminal, but from the browser.</p>
-
-  <div class="card">
-    <h2>Status</h2>
-    <div id="status">Loading...</div>
-    <div id="statusDetails" class="muted" style="margin-top:0.5rem"></div>
-    <div style="margin-top: 0.75rem">
-      <a href="/openclaw" target="_blank">Open OpenClaw UI</a>
-      &nbsp;|&nbsp;
-      <a href="/setup/export" target="_blank">Download backup (.tar.gz)</a>
-    </div>
-
-    <div style="margin-top: 0.75rem">
-      <div class="muted" style="margin-bottom:0.25rem"><strong>Import backup</strong> (advanced): restores into <code>/data</code> and restarts the gateway.</div>
-      <input id="importFile" type="file" accept=".tar.gz,application/gzip" />
-      <button id="importRun" style="background:#7c2d12; margin-top:0.5rem">Import</button>
-      <pre id="importOut" style="white-space:pre-wrap"></pre>
-    </div>
-  </div>
-
-  <div class="card">
-    <h2>Debug console</h2>
-    <p class="muted">Run a small allowlist of safe commands (no shell). Useful for debugging and recovery.</p>
-
-    <div style="display:flex; gap:0.5rem; align-items:center">
-      <select id="consoleCmd" style="flex: 1">
-        <option value="gateway.restart">gateway.restart (wrapper-managed)</option>
-        <option value="gateway.stop">gateway.stop (wrapper-managed)</option>
-        <option value="gateway.start">gateway.start (wrapper-managed)</option>
-        <option value="openclaw.status">openclaw status</option>
-        <option value="openclaw.health">openclaw health</option>
-        <option value="openclaw.doctor">openclaw doctor</option>
-        <option value="openclaw.logs.tail">openclaw logs --tail N</option>
-        <option value="openclaw.config.get">openclaw config get &lt;path&gt;</option>
-        <option value="openclaw.version">openclaw --version</option>
-        <option value="openclaw.devices.list">openclaw devices list</option>
-        <option value="openclaw.devices.approve">openclaw devices approve &lt;requestId&gt;</option>
-        <option value="openclaw.plugins.list">openclaw plugins list</option>
-        <option value="openclaw.plugins.enable">openclaw plugins enable &lt;name&gt;</option>
-      </select>
-      <input id="consoleArg" placeholder="Optional arg (e.g. 200, gateway.port)" style="flex: 1" />
-      <button id="consoleRun" style="background:#0f172a">Run</button>
-    </div>
-    <pre id="consoleOut" style="white-space:pre-wrap"></pre>
-  </div>
-
-  <div class="card">
-    <h2>Config editor (advanced)</h2>
-    <p class="muted">Edits the full config file on disk (JSON5). Saving creates a timestamped <code>.bak-*</code> backup and restarts the gateway.</p>
-    <div class="muted" id="configPath"></div>
-    <textarea id="configText" style="width:100%; height: 260px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;"></textarea>
-    <div style="margin-top:0.5rem">
-      <button id="configReload" style="background:#1f2937">Reload</button>
-      <button id="configSave" style="background:#111; margin-left:0.5rem">Save</button>
-    </div>
-    <pre id="configOut" style="white-space:pre-wrap"></pre>
-  </div>
-
-  <div class="card">
-    <h2>1) Model/auth provider</h2>
-    <p class="muted">Matches the groups shown in the terminal onboarding.</p>
-    <label>Provider group</label>
-    <select id="authGroup">
-      <option>Loading providers…</option>
-    </select>
-
-    <label>Auth method</label>
-    <select id="authChoice">
-      <option>Loading methods…</option>
-    </select>
-
-    <label>Key / Token (if required)</label>
-    <input id="authSecret" type="password" placeholder="Paste API key / token if applicable" />
-
-    <label>Wizard flow</label>
-    <select id="flow">
-      <option value="quickstart">quickstart</option>
-      <option value="advanced">advanced</option>
-      <option value="manual">manual</option>
-    </select>
-  </div>
-
-  <div class="card">
-    <h2>2) Optional: Channels</h2>
-    <p class="muted">You can also add channels later inside OpenClaw, but this helps you get messaging working immediately.</p>
-
-    <label>Telegram bot token (optional)</label>
-    <input id="telegramToken" type="password" placeholder="123456:ABC..." />
-    <div class="muted" style="margin-top: 0.25rem">
-      Get it from BotFather: open Telegram, message <code>@BotFather</code>, run <code>/newbot</code>, then copy the token.
-    </div>
-
-    <label>Discord bot token (optional)</label>
-    <input id="discordToken" type="password" placeholder="Bot token" />
-    <div class="muted" style="margin-top: 0.25rem">
-      Get it from the Discord Developer Portal: create an application, add a Bot, then copy the Bot Token.<br/>
-      <strong>Important:</strong> Enable <strong>MESSAGE CONTENT INTENT</strong> in Bot → Privileged Gateway Intents, or the bot will crash on startup.
-    </div>
-
-    <label>Slack bot token (optional)</label>
-    <input id="slackBotToken" type="password" placeholder="xoxb-..." />
-
-    <label>Slack app token (optional)</label>
-    <input id="slackAppToken" type="password" placeholder="xapp-..." />
-  </div>
-
-  <div class="card">
-    <h2>2b) Advanced: Custom OpenAI-compatible provider (optional)</h2>
-    <p class="muted">Use this to configure an OpenAI-compatible API that requires a custom base URL (e.g. Ollama, vLLM, LM Studio, hosted proxies). You usually set the API key as a Railway variable and reference it here.</p>
-
-    <label>Provider id (e.g. ollama, deepseek, myproxy)</label>
-    <input id="customProviderId" placeholder="ollama" />
-
-    <label>Base URL (must include /v1, e.g. http://host:11434/v1)</label>
-    <input id="customProviderBaseUrl" placeholder="http://127.0.0.1:11434/v1" />
-
-    <label>API (openai-completions or openai-responses)</label>
-    <select id="customProviderApi">
-      <option value="openai-completions">openai-completions</option>
-      <option value="openai-responses">openai-responses</option>
-    </select>
-
-    <label>API key env var name (optional, e.g. OLLAMA_API_KEY). Leave blank for no key.</label>
-    <input id="customProviderApiKeyEnv" placeholder="OLLAMA_API_KEY" />
-
-    <label>Optional model id to register (e.g. llama3.1:8b)</label>
-    <input id="customProviderModelId" placeholder="" />
-  </div>
-
-  <div class="card">
-    <h2>3) Run onboarding</h2>
-    <button id="run">Run setup</button>
-    <button id="pairingApprove" style="background:#1f2937; margin-left:0.5rem">Approve pairing</button>
-    <button id="reset" style="background:#444; margin-left:0.5rem">Reset setup</button>
-    <pre id="log" style="white-space:pre-wrap"></pre>
-    <p class="muted">Reset deletes the OpenClaw config file so you can rerun onboarding. Pairing approval lets you grant DM access when dmPolicy=pairing.</p>
-
-    <details style="margin-top: 0.75rem">
-      <summary><strong>Pairing helper</strong> (for “disconnected (1008): pairing required”)</summary>
-      <p class="muted">This lists pending device requests and lets you approve them without SSH.</p>
-      <button id="devicesRefresh" style="background:#0f172a">Refresh pending devices</button>
-      <div id="devicesList" class="muted" style="margin-top:0.5rem"></div>
-    </details>
-  </div>
-
-  <script src="/setup/app.js"></script>
-</body>
-</html>`);
+  // No inline <script>: JS lives in /setup/app.js and the markup in src/setup.html.
+  res.type("html").send(fs.readFileSync(path.join(SRC_DIR, "setup.html"), "utf8"));
 });
 
 const AUTH_GROUPS = [
@@ -585,10 +481,37 @@ app.get("/setup/api/status", requireSetupAuth, async (_req, res) => {
   res.json({
     configured: isConfigured(),
     gatewayTarget: GATEWAY_TARGET,
+    gatewayRunning: Boolean(gatewayProc),
     openclawVersion: version.output.trim(),
     channelsAddHelp: channelsHelp.output,
     authGroups: AUTH_GROUPS,
+    dashboardAuth: dashboardAuthMode(),
+    dashboardAuthLockedByEnv: Boolean(dashboardAuthModeFromEnv()),
+    controlUiUrl: controlUiUrl(),
+    // /setup is password-protected and already exposes the full config (which contains this token).
+    gatewayToken: OPENCLAW_GATEWAY_TOKEN,
+    gatewayTokenFromEnv: GATEWAY_TOKEN_FROM_ENV,
   });
+});
+
+// Switch how the dashboard is protected (see dashboardAuthMode()). Applies immediately, no restart needed.
+app.post("/setup/api/dashboard-auth", requireSetupAuth, (req, res) => {
+  const mode = String((req.body && req.body.mode) || "").trim().toLowerCase();
+  if (!DASHBOARD_AUTH_MODES.has(mode)) {
+    return res.status(400).json({ ok: false, error: 'mode must be "token" or "password"' });
+  }
+  if (dashboardAuthModeFromEnv()) {
+    return res.status(409).json({
+      ok: false,
+      error: "DASHBOARD_AUTH_MODE is set in Railway Variables and overrides this setting. Remove it to change the mode here.",
+    });
+  }
+  try {
+    setDashboardAuthMode(mode);
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: String(err) });
+  }
+  return res.json({ ok: true, dashboardAuth: dashboardAuthMode(), controlUiUrl: controlUiUrl() });
 });
 
 app.get("/setup/api/auth-groups", requireSetupAuth, (_req, res) => {
@@ -911,8 +834,10 @@ app.get("/setup/api/debug", requireSetupAuth, async (_req, res) => {
       internalGatewayPort: INTERNAL_GATEWAY_PORT,
       gatewayTarget: GATEWAY_TARGET,
       gatewayRunning: Boolean(gatewayProc),
-      gatewayTokenFromEnv: Boolean(process.env.OPENCLAW_GATEWAY_TOKEN?.trim()),
+      gatewayTokenFromEnv: GATEWAY_TOKEN_FROM_ENV,
       gatewayTokenPersisted: fs.existsSync(path.join(STATE_DIR, "gateway.token")),
+      dashboardAuth: dashboardAuthMode(),
+      dashboardAuthLockedByEnv: Boolean(dashboardAuthModeFromEnv()),
       lastGatewayError,
       lastGatewayExit,
       lastDoctorAt,
@@ -1297,6 +1222,9 @@ app.post("/setup/import", requireSetupAuth, async (req, res) => {
 
     try { fs.rmSync(tmpPath, { force: true }); } catch {}
 
+    // The backup may contain wrapper settings (dashboard auth mode).
+    wrapperSettings = readWrapperSettings();
+
     // Restart gateway after restore.
     if (isConfigured()) {
       await restartGateway();
@@ -1334,6 +1262,8 @@ proxy.on("error", (err, _req, res) => {
 function requireDashboardAuth(req, res, next) {
   if (req.path === "/healthz" || req.path === "/setup/healthz") return next();
   if (req.path.startsWith("/hooks")) return next(); // allow OpenClaw webhook endpoints to bypass dashboard auth
+  // Token mode: the gateway itself authenticates the browser (token in the WebSocket handshake).
+  if (dashboardAuthMode() === "token") return next();
   if (!SETUP_PASSWORD) return next(); // no password configured → open
   const header = req.headers.authorization || "";
   const [scheme, encoded] = header.split(" ");
@@ -1356,6 +1286,8 @@ function requireDashboardAuth(req, res, next) {
 // cannot set custom Authorization headers for WebSocket connections, so we inject
 // the token into proxied requests at the wrapper level.
 function attachGatewayAuthHeader(req) {
+  // In token mode the browser holds the token; injecting it here would make the dashboard public.
+  if (dashboardAuthMode() !== "password") return;
   if (!req?.headers?.authorization && OPENCLAW_GATEWAY_TOKEN) {
     req.headers.authorization = `Bearer ${OPENCLAW_GATEWAY_TOKEN}`;
   }
@@ -1406,6 +1338,7 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
 
   console.log(`[wrapper] gateway token: ${OPENCLAW_GATEWAY_TOKEN ? "(set)" : "(missing)"}`);
   console.log(`[wrapper] gateway target: ${GATEWAY_TARGET}`);
+  console.log(`[wrapper] dashboard auth mode: ${dashboardAuthMode()}${dashboardAuthModeFromEnv() ? " (from DASHBOARD_AUTH_MODE)" : ""}`);
   if (!SETUP_PASSWORD) {
     console.warn("[wrapper] WARNING: SETUP_PASSWORD is not set; /setup will error.");
   }
