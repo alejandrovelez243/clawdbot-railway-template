@@ -25,12 +25,13 @@ WORKDIR /openclaw
 ARG OPENCLAW_GIT_REF=v2026.3.8
 RUN git clone --depth 1 --branch "${OPENCLAW_GIT_REF}" https://github.com/openclaw/openclaw.git .
 
-# Patch: relax version requirements for packages that may reference unpublished versions.
-# Apply to all extension package.json files to handle workspace protocol (workspace:*).
+# Patch: relax peer version requirements that may reference unpublished versions.
+# Do NOT rewrite `workspace:*` refs: turning them into "*" makes pnpm install an older
+# `openclaw` from npm instead of linking the workspace root, and the built plugins then
+# load that mismatched copy (breaks runtime-postbuild on v2026.9.x).
 RUN set -eux; \
   find ./extensions -name 'package.json' -type f | while read -r f; do \
     sed -i -E 's/"openclaw"[[:space:]]*:[[:space:]]*">=[^"]+"/"openclaw": "*"/g' "$f"; \
-    sed -i -E 's/"openclaw"[[:space:]]*:[[:space:]]*"workspace:[^"]+"/"openclaw": "*"/g' "$f"; \
   done
 
 RUN pnpm install --no-frozen-lockfile
